@@ -1,21 +1,19 @@
 import os
+import sys
 import time
 import logging
-import logging.config
 
-# from logging_config import setup_logging
 from dotenv import load_dotenv
 import requests
 from telebot import TeleBot
 
+from expections import UnavailableTokens, UnsuccessfulSendMessage
 
 load_dotenv()
-# logging = setup_logging()
 
 PRACTICUM_TOKEN = os.getenv('PRACTICUM_TOKEN')
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
 TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
-
 
 RETRY_PERIOD = 600
 ENDPOINT = 'https://practicum.yandex.ru/api/user_api/homework_statuses/'
@@ -27,47 +25,56 @@ HOMEWORK_VERDICTS = {
     'rejected': 'Работа проверена: у ревьюера есть замечания.'
 }
 
+LOG_FILE_PATH = os.path.join(os.path.dirname(__file__), 'app.log')
 
+ONE_MONTH_IN_SECONDS = 2600000
 
 
 def check_tokens():
     """Проверка наличия токенов, перед запуском бота."""
-    if (
-        PRACTICUM_TOKEN is not None
-        and TELEGRAM_TOKEN is not None
-        and TELEGRAM_CHAT_ID is not None
-    ):
-        return True
-    else:
-        logging.critical('Переменные окружения отсутствуют.')
+    tokens_dict = {
+        'PRACTICUM_TOKEN': PRACTICUM_TOKEN,
+        'TELEGRAM_TOKEN': TELEGRAM_TOKEN,
+        'TELEGRAM_CHAT_ID': TELEGRAM_CHAT_ID,
+    }
+    empty_variables_from_tokens = []
+    for key, value in tokens_dict.items():
+        if not value:
+            logging.critical(f'Токен {key} пустой или некорректный.')
+            empty_variables_from_tokens.append(key)
+    if empty_variables_from_tokens:
+        raise UnavailableTokens(
+            f'Токены {empty_variables_from_tokens} недоступны.'
+        )
 
 
 def send_message(bot, message):
     """Отправка сообщения в Телеграмм."""
     try:
         bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message)
-        logging.debug('Сообщение отправлено')
-    except Exception as error:
+        logging.debug(f'Сообщение {message} отправлено')
+    except UnsuccessfulSendMessage as error:
         logging.error(f'Ошибка {error}. Не удалось отправить сообщение.')
 
 
 def get_api_answer(timestamp):
     """Получение ответа на запрос и обработка исключений."""
+    params = {'from_date': timestamp}
     try:
         response = requests.get(
             ENDPOINT,
             headers=HEADERS,
-            params={'from_date': timestamp},
+            params=params,
         )
-        if response.status_code != 200:
-            logging.error(f'Неудачный ответ от API: {response.status_code}')
-            raise requests.RequestException(
-                f'Неудачный ответ от API: {response.status_code}'
-            )
-        return response.json()
-    except Exception as error:
-        logging.error(f'Эндпоинт {ENDPOINT} недоступен. Ошибка {error}')
-        raise error(f'Эндпоинт {ENDPOINT} недоступен. Ошибка {error}')
+    except requests.RequestException as error:
+        logging.error(f'Эндпоинт {ENDPOINT} недоступен с'
+                      f'параметрами {params}. Ошибка {error}.')
+        raise error()
+
+    if response.status_code != 200:
+        logging.error(f'Неудачный статус-код от API: {response.status_code}')
+        raise requests.RequestException
+    return response.json()
 
 
 def check_response(response):
@@ -75,138 +82,96 @@ def check_response(response):
     try:
         homeworks = response['homeworks']
         if not isinstance(homeworks, list):
-            logging.error('Полученный тип данных не соответствует типу list')
-            raise TypeError('Полученный тип данных не соответствует типу list')
-        return homeworks[0]
-    except KeyError:
-        logging.error('Ключа "homeworks" нет в словаре.')
-        raise KeyError('Ключа "homeworks" нет в словаре.')
+            logging.error(
+                f'Полученный тип данных не соответствует типу. '
+                f'Ожидаемый тип: list, Получен тип: {type(homeworks)}')
+            raise TypeError
+        return homeworks
+    except KeyError as error:
+        logging.error(f'Ключа {error} нет в словаре. '
+                      f'Доступные ключи в запросе: {response.keys()}.')
+        raise KeyError
 
 
 def parse_status(homework):
     """Получение соответствующего вердикта."""
     try:
         status = homework['status']
+    except KeyError as error:
+        logging.error(f'Ключа {error} нет в коллекции '
+                      f'{type(homework)}, homework. Доступные ключи '
+                      f'в словаре: {homework.keys()}')
+        raise KeyError
+    try:
         verdict = HOMEWORK_VERDICTS[status]
-        if status is None:
-            logging.error(
-                'значение ключа "status" не содержит документации.'
-            )
-            raise ValueError(
-                'значение ключа "status" не содержит документации.'
-            )
-    except Exception as error:
-        logging.error(f'Ошибка {error}. Требуемого ключа нет в словаре.')
-        raise error(f'Ошибка {error}. Требуемого ключа нет в словаре.')
+    except KeyError as error:
+        logging.error(f'Вердикта {error} нет в коллекции '
+                      f'{type(verdict)}, verdict. Доступные ключи '
+                      f'в словаре: {verdict.keys()}')
+        raise KeyError
 
     try:
         homework_name = homework['homework_name']
-    except KeyError:
-        logging.error('Ключ "homework_name" отсутствует в словаре.')
-        raise KeyError('Ключ "homework_name" отсутствует в словаре.')
+    except KeyError as error:
+        logging.error(f'Требуемого ключа {error} нет в коллекции '
+                      f'{type(homework)}, homework. Доступные ключи '
+                      f'в словаре: {homework.keys()}')
+        raise KeyError
 
     return f'Изменился статус проверки работы "{homework_name}". {verdict}'
 
 
-def setup_logging():
-    """Хранение настроек для логгера."""
-    logger = logging.getLogger(__name__)
-    logger.setLevel(logging.DEBUG)
-
-    # Форматирование
-    formatter = logging.Formatter('%(asctime)s %(levelname)s %(message)s')
-    
-    # Хандлер для консоли
-    stream_handler = logging.StreamHandler()
-    stream_handler.setLevel(logging.DEBUG)
-    stream_handler.setFormatter(formatter)
-
-    # Файловый хандлер
-    current_path = os.path.dirname(__file__)
-    log_file_path = os.path.join(current_path, 'app.log')
-    file_handler = logging.FileHandler(log_file_path)
-    file_handler.setLevel(logging.DEBUG)
-    file_handler.setFormatter(formatter)
-
-    logger.addHandler(stream_handler)
-    logger.addHandler(file_handler)
-
-    return logger
-
-
 def main():
     """Основная логика работы бота."""
-    
-    # current_path = os.path.dirname(__file__)
-    # log_file_path = os.path.join(current_path, 'app.log')
-        
-    # LOGGING = {
-    #         'version': 1,
-    #         'formatters': {
-    #             'default': {
-    #                 'format': '%(asctime)s %(levelname)s %(message)s',
-    #             }
-    #         },
-    #         'handlers': {
-    #             'stream_handler': {
-    #                 'class': 'logging.StreamHandler',
-    #                 'level': 'DEBUG',
-    #                 'formatter': 'default'
-    #             },
-    #             'file_handler': {
-    #                 'class': 'logging.FileHandler',
-    #                 'filename': log_file_path,
-    #                 'level': 'DEBUG',
-    #                 'formatter': 'default',
-    #             }
-    #         },
-    #         'root': {
-    #             'level': 'DEBUG',
-    #             'handlers': ['stream_handler', 'file_handler']
-    #         }
-    #     }
-        
-    # logging.config.dictConfig(LOGGING)
+    # Проверка токенов.
+    try:
+        check_tokens()
+    except UnavailableTokens as error:
+        raise UnavailableTokens(f'Ошибка при проверке токенов: {error}')
 
-    
-    
-    # logging.setLevel(logging.INFO)
-    
-    # stream_handler = logging.StreamHandler()
-    # stream_handler.setLevel(logging.DEBUG)
-    
-    # file_handler = logging.StreamHandler()
-    # file_handler.setLevel(logging.DEBUG)
-    
-    # logging.addHandler(stream_handler)
-    # logging.addHandler(file_handler)
+    # Создаем объект класса бота
+    bot = TeleBot(token=TELEGRAM_TOKEN)
+    timestamp = int(time.time()) - ONE_MONTH_IN_SECONDS
+    current_status = None
 
-
-    if check_tokens():
-        # Создаём объект логгера
-        logging = setup_logging()
-        
-        # Создаем объект класса бота
-        bot = TeleBot(token=TELEGRAM_TOKEN)
-        one_month_in_seconds = 2600000
-        timestamp = int(time.time()) - one_month_in_seconds
-        current_status = None
-
-        while True:
-            try:
-                new_status = parse_status(check_response(
-                    get_api_answer(timestamp)))
+    while True:
+        try:
+            response = check_response(get_api_answer(timestamp))
+            if response:
+                new_status = parse_status(response[0])
                 if current_status != new_status:
                     current_status = new_status
                     send_message(bot, new_status)
-            except Exception as error:
-                message = f'Сбой в работе программы: {error}'
-                logging.error('Ошибка при обращении к API сервису.',
-                              exc_info=True)
+            else:
+                logging.debug('Домашней работы нет.')
+                message = 'Домашней работы нет.'
                 send_message(bot, message)
-                logging.debug('Сообщение отправлено')
+                continue
+
+        except Exception as error:
+            logging.error(
+                f'Ошибка при обращении к API сервису. Ошибка {error}',
+                exc_info=True)
+            message = f'Сбой в работе программы: {error}'
+            send_message(bot, message)
+            logging.debug(f'Сообщение {message} отправлено')
+        finally:
             time.sleep(RETRY_PERIOD)
 
 
 if __name__ == '__main__':
+    logging.basicConfig(
+        handlers=[logging.StreamHandler(sys.stdout),
+                  logging.FileHandler(LOG_FILE_PATH,
+                                      encoding='utf-8')
+                  ],
+        format=(
+            'Дата и время события: %(asctime)s, '
+            'Уровень лога: %(levelname)s, '
+            'Имя функции: %(funcName)s, '
+            'Строка: %(lineno)d, '
+            'Сообщение:  %(message)s '
+        ),
+        level=logging.DEBUG,
+    )
     main()
