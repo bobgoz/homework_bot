@@ -6,6 +6,7 @@ import logging
 from dotenv import load_dotenv
 import requests
 from telebot import TeleBot
+from http import HTTPStatus
 
 from expections import UnavailableTokens, UnsuccessfulSendMessage
 
@@ -40,12 +41,19 @@ def check_tokens():
     empty_variables_from_tokens = []
     for key, value in tokens_dict.items():
         if not value:
-            logging.critical(f'Токен {key} пустой или некорректный.')
             empty_variables_from_tokens.append(key)
     if empty_variables_from_tokens:
-        raise UnavailableTokens(
-            f'Токены {empty_variables_from_tokens} недоступны.'
-        )
+        # В зависимости от количества элементов в списке,
+        # формируется корректное сообщение.
+        if len(empty_variables_from_tokens) > 1:
+            message = (f'Токены {empty_variables_from_tokens} '
+                       'пусты или некорректны.')
+        else:
+            message = (f'Токен {empty_variables_from_tokens} '
+                       'пустой или некорректный.')
+        logging.critical(message)
+        return False
+    return True
 
 
 def send_message(bot, message):
@@ -54,7 +62,7 @@ def send_message(bot, message):
         bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message)
         logging.debug(f'Сообщение {message} отправлено')
     except UnsuccessfulSendMessage as error:
-        logging.error(f'Ошибка {error}. Не удалось отправить сообщение.')
+        raise error
 
 
 def get_api_answer(timestamp):
@@ -67,13 +75,13 @@ def get_api_answer(timestamp):
             params=params,
         )
     except requests.RequestException as error:
-        logging.error(f'Эндпоинт {ENDPOINT} недоступен с'
-                      f'параметрами {params}. Ошибка {error}.')
-        raise error()
+        raise error(f'Эндпоинт {ENDPOINT} недоступен с'
+                    f'параметрами {params}. Ошибка {error}.')
 
-    if response.status_code != 200:
-        logging.error(f'Неудачный статус-код от API: {response.status_code}')
-        raise requests.RequestException
+    if response.status_code != HTTPStatus.OK:
+        raise requests.RequestException('Получен неожиданный статус-код: '
+                                        f'{response.status_code}. Ожидаемый '
+                                        f'статус-код: {HTTPStatus.OK}.')
     return response.json()
 
 
@@ -82,15 +90,14 @@ def check_response(response):
     try:
         homeworks = response['homeworks']
         if not isinstance(homeworks, list):
-            logging.error(
-                f'Полученный тип данных не соответствует типу. '
-                f'Ожидаемый тип: list, Получен тип: {type(homeworks)}')
-            raise TypeError
+            raise TypeError('Полученный тип данных не соответствует типу. '
+                            'Ожидаемый тип: list, '
+                            f'Получен тип: {type(homeworks)}')
         return homeworks
     except KeyError as error:
-        logging.error(f'Ключа {error} нет в словаре. '
-                      f'Доступные ключи в запросе: {response.keys()}.')
-        raise KeyError
+        raise KeyError(f'Ключа {error} нет в коллекции '
+                       f'{type(response)}, response. '
+                       f'Доступные ключи в запросе: {response.keys()}.')
 
 
 def parse_status(homework):
@@ -98,25 +105,23 @@ def parse_status(homework):
     try:
         status = homework['status']
     except KeyError as error:
-        logging.error(f'Ключа {error} нет в коллекции '
-                      f'{type(homework)}, homework. Доступные ключи '
-                      f'в словаре: {homework.keys()}')
-        raise KeyError
+        raise KeyError(f'Ключа {error} нет в коллекции '
+                       f'{type(homework)}, homework. Доступные ключи '
+                       f'в словаре: {homework.keys()}')
+
     try:
         verdict = HOMEWORK_VERDICTS[status]
     except KeyError as error:
-        logging.error(f'Вердикта {error} нет в коллекции '
-                      f'{type(verdict)}, verdict. Доступные ключи '
-                      f'в словаре: {verdict.keys()}')
-        raise KeyError
+        raise KeyError(f'Вердикта {error} нет в коллекции '
+                       f'{type(verdict)}, verdict. Доступные ключи '
+                       f'в словаре: {verdict.keys()}')
 
     try:
         homework_name = homework['homework_name']
     except KeyError as error:
-        logging.error(f'Требуемого ключа {error} нет в коллекции '
-                      f'{type(homework)}, homework. Доступные ключи '
-                      f'в словаре: {homework.keys()}')
-        raise KeyError
+        raise KeyError(f'Требуемого ключа {error} нет в коллекции '
+                       f'{type(homework)}, homework. Доступные ключи '
+                       f'в словаре: {homework.keys()}')
 
     return f'Изменился статус проверки работы "{homework_name}". {verdict}'
 
@@ -124,10 +129,9 @@ def parse_status(homework):
 def main():
     """Основная логика работы бота."""
     # Проверка токенов.
-    try:
-        check_tokens()
-    except UnavailableTokens as error:
-        raise UnavailableTokens(f'Ошибка при проверке токенов: {error}')
+
+    if not check_tokens():
+        raise UnavailableTokens('Ошибка при проверке токенов')
 
     # Создаем объект класса бота
     bot = TeleBot(token=TELEGRAM_TOKEN)
@@ -136,17 +140,17 @@ def main():
 
     while True:
         try:
-            response = check_response(get_api_answer(timestamp))
-            if response:
-                new_status = parse_status(response[0])
-                if current_status != new_status:
-                    current_status = new_status
-                    send_message(bot, new_status)
-            else:
-                logging.debug('Домашней работы нет.')
+            homeworks = check_response(get_api_answer(timestamp))
+            if not homeworks:
                 message = 'Домашней работы нет.'
+                logging.debug(message)
                 send_message(bot, message)
                 continue
+
+            new_status = parse_status(homeworks[0])
+            if current_status != new_status:
+                current_status = new_status
+                send_message(bot, new_status)
 
         except Exception as error:
             logging.error(
@@ -154,7 +158,6 @@ def main():
                 exc_info=True)
             message = f'Сбой в работе программы: {error}'
             send_message(bot, message)
-            logging.debug(f'Сообщение {message} отправлено')
         finally:
             time.sleep(RETRY_PERIOD)
 
