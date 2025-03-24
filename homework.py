@@ -38,22 +38,12 @@ def check_tokens():
         'TELEGRAM_TOKEN': TELEGRAM_TOKEN,
         'TELEGRAM_CHAT_ID': TELEGRAM_CHAT_ID,
     }
-    empty_variables_from_tokens = []
+    has_errors = False
     for key, value in tokens_dict.items():
         if not value:
-            empty_variables_from_tokens.append(key)
-    if empty_variables_from_tokens:
-        # В зависимости от количества элементов в списке,
-        # формируется корректное сообщение.
-        if len(empty_variables_from_tokens) > 1:
-            message = (f'Токены {empty_variables_from_tokens} '
-                       'пусты или некорректны.')
-        else:
-            message = (f'Токен {empty_variables_from_tokens} '
-                       'пустой или некорректный.')
-        logging.critical(message)
-        return False
-    return True
+            logging.critical(f'Токен {key} отсутствует или некорректен.')
+            has_errors = True
+    return not has_errors
 
 
 def send_message(bot, message):
@@ -62,7 +52,7 @@ def send_message(bot, message):
         bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message)
         logging.debug(f'Сообщение {message} отправлено')
     except UnsuccessfulSendMessage as error:
-        raise error
+        logging.debug(f'Сообщение {message} не отправлено. Ошибка {error}')
 
 
 def get_api_answer(timestamp):
@@ -137,6 +127,7 @@ def main():
     bot = TeleBot(token=TELEGRAM_TOKEN)
     timestamp = int(time.time()) - ONE_MONTH_IN_SECONDS
     current_status = None
+    last_error_message = None
 
     while True:
         try:
@@ -157,7 +148,10 @@ def main():
                 f'Ошибка при обращении к API сервису. Ошибка {error}',
                 exc_info=True)
             message = f'Сбой в работе программы: {error}'
-            send_message(bot, message)
+            # Отправка сообщения при новой ошибке.
+            if message != last_error_message:
+                send_message(bot, message)
+                last_error_message = message
         finally:
             time.sleep(RETRY_PERIOD)
 
